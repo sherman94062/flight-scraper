@@ -78,6 +78,12 @@ flight-scraper/
   README.md
 ```
 
+## Google Sheets output
+
+The script attempts to write results to a new Google Sheet in your Drive after each run. This requires a one-time OAuth setup — see [SETUP.md](SETUP.md) for instructions.
+
+> **Note:** Getting the Google Sheets integration fully working required non-trivial OAuth setup (creating a Google Cloud project, enabling APIs, configuring an OAuth consent screen, and downloading credentials). If you just want the flight data, `flights.csv` is written locally without any auth. Expect to spend time on the Sheets setup if you want that output.
+
 ## Stack
 
 - [Playwright](https://playwright.dev/) — browser automation

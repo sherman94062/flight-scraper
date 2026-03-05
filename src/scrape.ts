@@ -221,22 +221,40 @@ async function handleDates(page: Page) {
 // Most reliable approach: grab the full page text and parse line-by-line.
 
 async function extractFlights(page: Page): Promise<Flight[]> {
-  // Get the text content of the main results area
-  const raw = await page.locator('[role="main"]').innerText()
-    .catch(() => page.locator('body').innerText());
+  // Prefer the main content area; fall back to full body text
+  let raw = await page.locator('[role="main"]').innerText().catch(() => '');
+  if (raw.length < 200) raw = await page.locator('body').innerText().catch(() => '');
 
-  const lines  = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+
   const flights: Flight[] = [];
+  // U+2013 en-dash, U+2014 em-dash, plain hyphen
+  const TIME_RE      = /(\d{1,2}:\d{2}\s*[AP]M)\s*[\u2013\u2014\-]\s*(\d{1,2}:\d{2}\s*[AP]M)/i;
+  const SOLO_TIME_RE = /^(\d{1,2}:\d{2}\s*[AP]M)/i;
+  const DASH_RE      = /^[\u2013\u2014\-]+$/;
 
   for (let i = 0; i < lines.length; i++) {
-    // Each flight card starts with a departure–arrival time line
-    const timeM = lines[i].match(
-      /^(\d{1,2}:\d{2}\s*[AP]M)\s*[–\-]\s*(\d{1,2}:\d{2}\s*[AP]M)/i
-    );
-    if (!timeM) continue;
+    let departure = '', arrival = '';
 
-    // Scan the next ~10 lines for duration, airline, and price
-    const block = lines.slice(i, i + 10).join('\n');
+    // Pattern A: "6:00 AM – 10:30 AM" on one line
+    const combined = lines[i].match(TIME_RE);
+    if (combined) {
+      departure = combined[1];
+      arrival   = combined[2];
+    } else {
+      // Pattern B: departure / standalone dash / arrival on THREE consecutive lines
+      //   "5:00 AM"  "\n"  "–"  "\n"  "11:31 AM"
+      const depM  = lines[i].match(SOLO_TIME_RE);
+      const dashM = lines[i + 1]?.match(DASH_RE);
+      const arrM  = lines[i + 2]?.match(SOLO_TIME_RE);
+      if (!depM || !dashM || !arrM) continue;
+      departure = depM[1];
+      arrival   = arrM[1];
+      i += 2; // skip dash + arrival lines
+    }
+
+    // Scan the next ~14 lines for price, duration, airline (Google adds ~10 lines of metadata)
+    const block = lines.slice(i, i + 14).join('\n');
 
     const priceM = block.match(/\$(\d[\d,]+)/);
     if (!priceM) continue;
@@ -246,25 +264,20 @@ async function extractFlights(page: Page): Promise<Flight[]> {
     const durationM = block.match(/(\d+\s*hr(?:\s*\d+\s*min)?)/i);
     const duration  = durationM?.[1] ?? 'N/A';
 
-    // Airline: a short non-numeric line in the block that isn't a time/duration/stop/price
-    const airline = lines.slice(i + 1, i + 8).find(l =>
-      l.length > 1 && l.length < 50 &&
-      !l.match(/^\d{1,2}:\d{2}/) &&          // not a time
+    // Airline: first short non-noise line after the time line
+    const airline = lines.slice(i + 1, i + 9).find(l =>
+      l.length > 1 && l.length < 60 &&
+      !l.match(/\d{1,2}:\d{2}/) &&           // not a time
       !l.match(/\d+\s*hr/i) &&               // not duration
       !l.match(/nonstop|stop/i) &&           // not stop count
-      !l.match(/kg CO2|emission/i) &&        // not emissions
-      !l.match(/round trip|one way/i) &&     // not trip type
+      !l.match(/kg\s*CO2|emission/i) &&      // not emissions
+      !l.match(/round trip|one way/i) &&     // not trip type label
+      !l.match(/[\u2013\u2014]/) &&          // not a dash-separated field
       !l.startsWith('$') &&                  // not price
-      !/^\d+$/.test(l)                       // not a bare number
+      !/^\d+$/.test(l)                       // not bare number
     ) ?? 'Unknown';
 
-    flights.push({
-      airline,
-      price,
-      departure: timeM[1],
-      arrival:   timeM[2],
-      duration,
-    });
+    flights.push({ airline, price, departure, arrival, duration });
   }
 
   console.log(`  Parsed ${flights.length} flights from page text`);
