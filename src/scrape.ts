@@ -169,6 +169,29 @@ async function clickDate(page: Page, ariaLabel: string, iso: string) {
   throw new Error(`Could not click date: ${ariaLabel} (${iso})`);
 }
 
+async function dismissDatePicker(page: Page) {
+  // 1. Wait up to 5 s for "Done" button to become clickable, then click it
+  try {
+    const done = page.getByRole('button', { name: /^done$/i });
+    await done.waitFor({ state: 'visible', timeout: 5000 });
+    await done.click();
+    console.log('  ✓ Dismissed via Done button');
+    await delay(600);
+    return;
+  } catch { /* fall through */ }
+
+  // 2. Escape key
+  await page.keyboard.press('Escape');
+  await delay(500);
+  const stillOpen = await page.locator('[role="dialog"]').isVisible().catch(() => false);
+  if (!stillOpen) { console.log('  ✓ Dismissed via Escape'); return; }
+
+  // 3. Click somewhere neutral outside the calendar
+  await page.mouse.click(640, 30);
+  await delay(500);
+  console.log('  ✓ Dismissed via outside click');
+}
+
 async function handleDates(page: Page) {
   console.log('\n[Dates] Opening departure picker…');
   await openDeparturePicker(page);
@@ -176,16 +199,16 @@ async function handleDates(page: Page) {
   await ensureMonthVisible(page, 'March');
 
   await clickDate(page, 'March 15, 2026', '2026-03-15');
-  await delay(600);
+  await delay(800);
+  await shot('4b-depart-selected', page);
+
   await ensureMonthVisible(page, 'March');
-
   await clickDate(page, 'March 20, 2026', '2026-03-20');
-  await delay(600);
+  await delay(800);
+  await shot('4c-return-selected', page);
 
-  try {
-    const done = page.locator('button:has-text("Done"), [aria-label*="Done" i]').first();
-    if (await done.isVisible({ timeout: 2000 })) { await done.click(); await delay(400); }
-  } catch { /* no Done needed */ }
+  await dismissDatePicker(page);
+  await shot('4d-picker-dismissed', page);
 }
 
 // ── Result extraction ─────────────────────────────────────────────────────────
