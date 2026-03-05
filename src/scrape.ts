@@ -216,40 +216,58 @@ async function handleDates(page: Page) {
 }
 
 // ── Result extraction ─────────────────────────────────────────────────────────
+//
+// Google Flights results are not [role="listitem"] — they're styled divs.
+// Most reliable approach: grab the full page text and parse line-by-line.
 
 async function extractFlights(page: Page): Promise<Flight[]> {
-  const flights: Flight[] = [];
-  let cards = null;
-  for (const sel of ['[role="listitem"]', 'li[jsmodel]', '.pIav2d']) {
-    const loc = page.locator(sel);
-    const n   = await loc.count().catch(() => 0);
-    if (n > 2) { console.log(`  Using "${sel}" (${n} items)`); cards = loc; break; }
-  }
-  if (!cards) { console.warn('  No result cards found'); return []; }
+  // Get the text content of the main results area
+  const raw = await page.locator('[role="main"]').innerText()
+    .catch(() => page.locator('body').innerText());
 
-  const total = await cards.count();
-  for (let i = 0; i < Math.min(total, 25); i++) {
-    const text = await cards.nth(i).innerText().catch(() => '');
-    if (!text.trim()) continue;
-    const priceM = text.match(/\$(\d[\d,]+)/);
+  const lines  = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  const flights: Flight[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    // Each flight card starts with a departure–arrival time line
+    const timeM = lines[i].match(
+      /^(\d{1,2}:\d{2}\s*[AP]M)\s*[–\-]\s*(\d{1,2}:\d{2}\s*[AP]M)/i
+    );
+    if (!timeM) continue;
+
+    // Scan the next ~10 lines for duration, airline, and price
+    const block = lines.slice(i, i + 10).join('\n');
+
+    const priceM = block.match(/\$(\d[\d,]+)/);
     if (!priceM) continue;
     const price = parseInt(priceM[1].replace(',', ''), 10);
-    if (isNaN(price) || price < 50 || price > 10_000) continue;
-    const timeM     = text.match(/(\d{1,2}:\d{2}\s*[AP]M)\s*[–\-]\s*(\d{1,2}:\d{2}\s*[AP]M)/i);
-    const durationM = text.match(/(\d+\s*hr(?:\s*\d+\s*min)?)/i);
-    const airline   = text.split('\n').map(l => l.trim()).find(l =>
-      l.length > 2 && l.length < 60 &&
-      !l.startsWith('$') && !l.match(/\d:\d{2}/) &&
-      !l.match(/\d+\s*hr/i) && !l.match(/nonstop|stop/i) && !/^\d+$/.test(l)
+    if (isNaN(price) || price < 50 || price > 15_000) continue;
+
+    const durationM = block.match(/(\d+\s*hr(?:\s*\d+\s*min)?)/i);
+    const duration  = durationM?.[1] ?? 'N/A';
+
+    // Airline: a short non-numeric line in the block that isn't a time/duration/stop/price
+    const airline = lines.slice(i + 1, i + 8).find(l =>
+      l.length > 1 && l.length < 50 &&
+      !l.match(/^\d{1,2}:\d{2}/) &&          // not a time
+      !l.match(/\d+\s*hr/i) &&               // not duration
+      !l.match(/nonstop|stop/i) &&           // not stop count
+      !l.match(/kg CO2|emission/i) &&        // not emissions
+      !l.match(/round trip|one way/i) &&     // not trip type
+      !l.startsWith('$') &&                  // not price
+      !/^\d+$/.test(l)                       // not a bare number
     ) ?? 'Unknown';
+
     flights.push({
       airline,
       price,
-      departure: timeM?.[1]     ?? 'N/A',
-      arrival:   timeM?.[2]     ?? 'N/A',
-      duration:  durationM?.[1] ?? 'N/A',
+      departure: timeM[1],
+      arrival:   timeM[2],
+      duration,
     });
   }
+
+  console.log(`  Parsed ${flights.length} flights from page text`);
   return flights;
 }
 
@@ -356,7 +374,9 @@ async function writeToSheets(flights: Flight[]): Promise<string | null> {
   console.log('\n[Sheets] Creating spreadsheet in your Google Drive…');
   const sheets = google.sheets({ version: 'v4', auth: client });
 
-  const title = `Flights AUS→JFK ${new Date().toLocaleDateString('en-US')}`;
+  const now   = new Date();
+  const ts    = now.toISOString().slice(0, 16).replace('T', '_').replace(':', '');
+  const title = `flight_scraper_AUS_JFK_${ts}`; // e.g. flight_scraper_AUS_JFK_2026-03-05_1145
   const { data } = await sheets.spreadsheets.create({
     requestBody: {
       properties: { title },
@@ -490,8 +510,14 @@ async function main() {
 
     // ── Wait for results ─────────────────────────────────────────────────────
     console.log('[6] Waiting for results…');
-    await page.waitForSelector('[role="listitem"], li[jsmodel]', { timeout: 35000 });
-    await delay(2000);
+    // Google Flights results aren't [role="listitem"] — wait for the heading
+    // that appears when flight cards have loaded.
+    await page.waitForFunction(
+      () => /Top departing flights|Other departing flights|No results/
+              .test(document.body.innerText),
+      { timeout: 35000 }
+    );
+    await delay(1500);
     await shot('6-results', page);
 
     // ── Extract & save ───────────────────────────────────────────────────────
