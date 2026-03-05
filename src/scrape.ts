@@ -2,10 +2,10 @@ import { chromium, type Page } from 'playwright';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const ORIGIN_QUERY = 'Austin';
-const ORIGIN_CODE = 'AUS';
+const ORIGIN_QUERY    = 'Austin';
+const ORIGIN_CODE     = 'AUS';
 const DESTINATION_QUERY = 'New York';
-const DESTINATION_CODE = 'JFK';
+const DESTINATION_CODE  = 'JFK';
 const PRICE_LIMIT = 300;
 
 interface Flight {
@@ -16,223 +16,272 @@ interface Flight {
   duration: string;
 }
 
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+const cwd   = process.cwd();
+const shot  = (name: string, p: Page) =>
+  p.screenshot({ path: path.join(cwd, `shot-${name}.png`), fullPage: false })
+   .catch(() => {});
 
-// ── Consent dialog ──────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
-async function dismissConsentDialog(page: Page) {
-  for (const sel of [
-    'button[aria-label="Accept all"]',
-    'button:has-text("Accept all")',
-    'button:has-text("I agree")',
-  ]) {
+async function dismissConsent(page: Page) {
+  for (const t of ['Accept all', 'I agree', 'Agree']) {
     try {
-      const btn = page.locator(sel).first();
-      if (await btn.isVisible({ timeout: 2000 })) {
-        await btn.click();
-        console.log('Dismissed consent dialog');
-        await delay(1000);
-        return;
-      }
+      const b = page.getByRole('button', { name: new RegExp(t, 'i') }).first();
+      if (await b.isVisible({ timeout: 1500 })) { await b.click(); await delay(800); return; }
     } catch { /* not found */ }
   }
 }
 
-// ── Airport field ────────────────────────────────────────────────────────────
-
-async function fillAirportField(page: Page, placeholder: string, query: string, code: string) {
-  console.log(`Filling "${placeholder}" → "${query}" (${code})…`);
-
-  // Close any open calendar / dialog first
+async function closeOverlays(page: Page) {
   await page.keyboard.press('Escape').catch(() => {});
-  await delay(400);
+  await delay(300);
+}
 
-  // Find the input
-  let input = null;
-  for (const sel of [
-    `input[placeholder*="${placeholder}" i]`,
-    `[aria-label*="${placeholder}" i] input`,
-    `[data-placeholder*="${placeholder}" i] input`,
-  ]) {
-    try {
-      const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 2000 })) { input = el; break; }
-    } catch { /* try next */ }
-  }
-  if (!input) throw new Error(`Input not found for "${placeholder}"`);
+/** Log every input/combobox on page — helps diagnose selector issues */
+async function debugInputs(page: Page) {
+  const info = await page.evaluate(() => {
+    const els = document.querySelectorAll('input, [role="combobox"], [role="textbox"]');
+    return Array.from(els).slice(0, 20).map(el => ({
+      tag:         el.tagName,
+      role:        el.getAttribute('role'),
+      placeholder: (el as HTMLInputElement).placeholder ?? '',
+      ariaLabel:   el.getAttribute('aria-label') ?? '',
+      ariaHidden:  el.getAttribute('aria-hidden') ?? '',
+      visible:     (el as HTMLElement).offsetHeight > 0,
+      value:       (el as HTMLInputElement).value ?? '',
+    }));
+  });
+  console.log('\n── Page inputs ──────────────────────────────────');
+  info.forEach((i, n) =>
+    console.log(`  [${n}] ${i.tag} role=${i.role} placeholder="${i.placeholder}" aria-label="${i.ariaLabel}" visible=${i.visible} value="${i.value}"`)
+  );
+  console.log('────────────────────────────────────────────────\n');
+}
 
-  // Select-all then type so any existing value is replaced
-  await input.click({ clickCount: 3 });
+// ── Airport fill ─────────────────────────────────────────────────────────────
+
+async function fillAirport(page: Page, idx: 0 | 1, query: string, code: string) {
+  console.log(`\n[Airport ${idx === 0 ? 'origin' : 'dest'}] "${query}" (${code})`);
+
+  await closeOverlays(page);
   await delay(200);
-  await input.pressSequentially(query, { delay: 60 });
-  await delay(1200);
 
-  // Wait for a VISIBLE option that contains the airport code
-  const option = page.locator('[role="option"]').filter({ hasText: code }).first();
+  // Find the input — Google Flights uses comboboxes; grab by index
+  // Index 0 = origin ("Where from?"), index 1 = destination ("Where to?")
+  const allInputs = page.locator(
+    'input[role="combobox"], [role="combobox"] input, input[placeholder*="from" i], input[placeholder*="to" i], input[aria-label*="from" i], input[aria-label*="to" i]'
+  );
+
+  // Also try the generic combobox roles
+  const comboboxes = page.getByRole('combobox');
+
+  let input =
+    // first: try typed placeholder
+    idx === 0
+      ? page.locator('input[placeholder*="from" i], input[aria-label*="from" i]').first()
+      : page.locator('input[placeholder*="to" i], input[aria-label*="to" i]').first();
+
+  // If not visible, fall back to nth combobox
+  if (!(await input.isVisible({ timeout: 1500 }).catch(() => false))) {
+    const count = await comboboxes.count().catch(() => 0);
+    console.log(`  Placeholder selector not found. ${count} comboboxes on page.`);
+    input = comboboxes.nth(idx);
+  }
+
+  await input.click({ clickCount: 3, timeout: 6000 });
+  await delay(200);
+  await input.pressSequentially(query, { delay: 70 });
+  await delay(1500);
+
+  // Wait for any visible option containing the airport code
   try {
-    await option.waitFor({ state: 'visible', timeout: 8000 });
-    await option.click();
+    await page.waitForFunction(
+      (code: string) => {
+        const opts = Array.from(document.querySelectorAll('[role="option"], [role="listitem"], li'));
+        return opts.some(o => {
+          const el = o as HTMLElement;
+          return el.offsetParent !== null && (el.textContent ?? '').includes(code);
+        });
+      },
+      code,
+      { timeout: 7000 }
+    );
+    // Click the first visible option with the code
+    const option = page.locator(`[role="option"]:visible, li:visible`).filter({ hasText: code }).first();
+    await option.click({ timeout: 4000 });
     console.log(`  ✓ Selected ${code}`);
   } catch {
-    console.log(`  ⚠ Dropdown not seen — pressing ArrowDown + Enter`);
+    console.log(`  ⚠ Dropdown not found — pressing ArrowDown + Enter`);
     await page.keyboard.press('ArrowDown');
-    await delay(300);
+    await delay(400);
     await page.keyboard.press('Enter');
   }
 
   await delay(700);
-
-  // Dismiss any calendar that auto-opens after airport selection
-  const dialogOpen = await page.locator('[role="dialog"]').isVisible().catch(() => false);
-  if (dialogOpen) {
-    console.log('  → Calendar opened; pressing Escape');
-    await page.keyboard.press('Escape');
-    await delay(400);
-  }
+  await closeOverlays(page);
 }
 
-// ── Date picker ──────────────────────────────────────────────────────────────
+// ── Date picker ───────────────────────────────────────────────────────────────
 
-async function clickCalendarDay(page: Page, ariaLabel: string, isoDate: string) {
-  for (const sel of [
-    `[aria-label="${ariaLabel}"]`,
-    `[aria-label*="${ariaLabel}"]`,
-    `[data-iso="${isoDate}"]`,
-    `td[data-date="${isoDate}"]`,
-  ]) {
-    try {
-      const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 3000 })) {
-        await el.click();
-        console.log(`  ✓ Clicked ${ariaLabel}`);
-        return;
-      }
-    } catch { /* try next */ }
-  }
-  throw new Error(`Could not click calendar date: ${ariaLabel}`);
-}
-
-async function ensureMonthVisible(page: Page, monthText: string) {
-  for (let i = 0; i < 12; i++) {
-    const dialogText = await page.locator('[role="dialog"]').innerText().catch(() => '');
-    if (dialogText.includes(monthText)) return;
-    const next = page.locator('[aria-label*="Next month" i]').first();
-    await next.click({ timeout: 3000 });
-    await delay(400);
-  }
-}
-
-async function handleDatePicker(page: Page) {
-  console.log('Setting departure date (March 15) and return date (March 20)…');
-
-  // Open the departure date field
+async function openDeparturePicker(page: Page) {
+  // Try common selectors for the departure date field
   for (const sel of [
     '[aria-label*="Departure" i]',
     '[placeholder*="Departure" i]',
     'input[aria-label*="Depart" i]',
+    '[data-placeholder*="Depart" i]',
   ]) {
     try {
       const el = page.locator(sel).first();
       if (await el.isVisible({ timeout: 2000 })) {
         await el.click();
-        await delay(800);
-        break;
+        console.log(`  Opened date picker via ${sel}`);
+        await delay(1000);
+        return;
+      }
+    } catch { /* try next */ }
+  }
+  // Fallback: Tab twice from last focused element
+  console.log('  ⚠ Could not find departure field; Tabbing…');
+  await page.keyboard.press('Tab');
+  await delay(400);
+  await page.keyboard.press('Tab');
+  await delay(400);
+}
+
+async function ensureMonthVisible(page: Page, monthName: string) {
+  const dialog = page.locator('[role="dialog"]');
+  for (let i = 0; i < 8; i++) {
+    const text = await dialog.innerText().catch(async () => page.locator('body').innerText());
+    if ((typeof text === 'string' ? text : await text).includes(monthName)) return;
+    try {
+      await page.locator('[aria-label*="Next month" i]').first().click({ timeout: 2000 });
+      await delay(400);
+    } catch { break; }
+  }
+}
+
+async function clickDate(page: Page, label: string, iso: string) {
+  // Try a series of selectors; the aria-label="March 15, 2026" is most reliable on Google Flights
+  const day = parseInt(iso.split('-')[2], 10);
+  for (const sel of [
+    `[aria-label="${label}"]`,
+    `[aria-label*="${label}"]`,
+    `[data-iso="${iso}"]`,
+    `td[data-date="${iso}"]`,
+    `[role="button"][data-date="${iso}"]`,
+  ]) {
+    try {
+      const el = page.locator(sel).first();
+      if (await el.isVisible({ timeout: 2000 })) {
+        await el.click();
+        console.log(`  ✓ Clicked ${label}`);
+        return;
       }
     } catch { /* try next */ }
   }
 
-  // Ensure March 2026 is visible
+  // Fallback: find a cell in the dialog containing exactly the day number
+  console.log(`  ⚠ aria-label selectors failed; falling back to cell text "${day}"`);
+  const cells = page.locator('[role="dialog"] [role="gridcell"], [role="dialog"] td');
+  const n = await cells.count().catch(() => 0);
+  for (let i = 0; i < n; i++) {
+    const t = await cells.nth(i).innerText().catch(() => '');
+    if (t.trim() === String(day)) {
+      await cells.nth(i).click();
+      console.log(`  ✓ Clicked cell with text "${day}"`);
+      return;
+    }
+  }
+  throw new Error(`Cannot click date: ${label}`);
+}
+
+async function handleDates(page: Page) {
+  console.log('\n[Dates] Opening picker…');
+  await openDeparturePicker(page);
+  await shot('3-datepicker', page);
+
   await ensureMonthVisible(page, 'March');
 
-  // Click departure: March 15, 2026
-  await clickCalendarDay(page, 'March 15, 2026', '2026-03-15');
+  console.log('  Setting departure → March 15');
+  await clickDate(page, 'March 15, 2026', '2026-03-15');
   await delay(500);
 
-  // After selecting departure the calendar stays open for return date
-  // Ensure March is still visible (may have scrolled)
   await ensureMonthVisible(page, 'March');
 
-  // Click return: March 20, 2026
-  await clickCalendarDay(page, 'March 20, 2026', '2026-03-20');
+  console.log('  Setting return → March 20');
+  await clickDate(page, 'March 20, 2026', '2026-03-20');
   await delay(500);
 
-  // Click Done to confirm dates
   try {
     const done = page.locator('button:has-text("Done"), [aria-label*="Done" i]').first();
-    if (await done.isVisible({ timeout: 3000 })) {
-      await done.click();
-      console.log('  ✓ Clicked Done');
-      await delay(500);
-    }
+    if (await done.isVisible({ timeout: 2000 })) { await done.click(); await delay(400); }
   } catch { /* no Done button needed */ }
 }
 
-// ── Result extraction ────────────────────────────────────────────────────────
+// ── Results extraction ────────────────────────────────────────────────────────
 
 async function extractFlights(page: Page): Promise<Flight[]> {
-  console.log('Extracting results…');
-
+  const flights: Flight[] = [];
   let cards = null;
+
   for (const sel of ['[role="listitem"]', 'li[jsmodel]', '.pIav2d']) {
     const loc = page.locator(sel);
-    const n = await loc.count().catch(() => 0);
-    if (n > 2) { console.log(`  Using selector: ${sel} (${n} items)`); cards = loc; break; }
+    const n   = await loc.count().catch(() => 0);
+    if (n > 2) { console.log(`  Using selector "${sel}" — ${n} cards`); cards = loc; break; }
   }
-  if (!cards) { console.warn('No result cards found'); return []; }
+  if (!cards) { console.warn('  No result cards found'); return []; }
 
-  const flights: Flight[] = [];
-  const count = await cards.count();
-  for (let i = 0; i < Math.min(count, 25); i++) {
+  const total = await cards.count();
+  for (let i = 0; i < Math.min(total, 25); i++) {
     const text = await cards.nth(i).innerText().catch(() => '');
     if (!text.trim()) continue;
 
-    const priceMatch = text.match(/\$(\d[\d,]+)/);
-    if (!priceMatch) continue;
-    const price = parseInt(priceMatch[1].replace(',', ''), 10);
+    const priceM = text.match(/\$(\d[\d,]+)/);
+    if (!priceM) continue;
+    const price = parseInt(priceM[1].replace(',', ''), 10);
     if (isNaN(price) || price < 50 || price > 10_000) continue;
 
-    const timeMatch = text.match(/(\d{1,2}:\d{2}\s*[AP]M)\s*[–\-]\s*(\d{1,2}:\d{2}\s*[AP]M)/i);
-    const departure = timeMatch?.[1] ?? 'N/A';
-    const arrival   = timeMatch?.[2] ?? 'N/A';
+    const timeM    = text.match(/(\d{1,2}:\d{2}\s*[AP]M)\s*[–\-]\s*(\d{1,2}:\d{2}\s*[AP]M)/i);
+    const durationM = text.match(/(\d+\s*hr(?:\s*\d+\s*min)?)/i);
 
-    const durationMatch = text.match(/(\d+\s*hr(?:\s*\d+\s*min)?)/i);
-    const duration = durationMatch?.[1] ?? 'N/A';
+    const airline = text.split('\n').map(l => l.trim()).find(l =>
+      l.length > 2 && l.length < 60 &&
+      !l.startsWith('$') && !l.match(/\d:\d{2}/) &&
+      !l.match(/\d+\s*hr/i) && !l.match(/nonstop|stop/i) && !/^\d+$/.test(l)
+    ) ?? 'Unknown';
 
-    const airline = text.split('\n')
-      .map(l => l.trim())
-      .find(l =>
-        l.length > 2 && l.length < 60 &&
-        !l.startsWith('$') && !l.match(/\d:\d{2}/) &&
-        !l.match(/\d+\s*hr/i) && !l.match(/nonstop|stop/i) &&
-        !l.match(/^\d+$/)
-      ) ?? 'Unknown';
-
-    flights.push({ airline, price, departure, arrival, duration });
+    flights.push({
+      airline,
+      price,
+      departure: timeM?.[1]    ?? 'N/A',
+      arrival:   timeM?.[2]    ?? 'N/A',
+      duration:  durationM?.[1] ?? 'N/A',
+    });
   }
   return flights;
 }
 
-// ── CSV ──────────────────────────────────────────────────────────────────────
-
-function saveCSV(flights: Flight[], filePath: string) {
-  const rows = flights.map((f, i) =>
-    `${i + 1},"${f.airline}",${f.price},"${f.departure}","${f.arrival}","${f.duration}"`
-  );
-  fs.writeFileSync(filePath,
-    'rank,airline,price,departure,arrival,duration\n' + rows.join('\n') + '\n',
+function saveCSV(flights: Flight[]) {
+  const p = path.join(cwd, 'flights.csv');
+  fs.writeFileSync(p,
+    'rank,airline,price,departure,arrival,duration\n' +
+    flights.map((f, i) =>
+      `${i+1},"${f.airline}",${f.price},"${f.departure}","${f.arrival}","${f.duration}"`
+    ).join('\n') + '\n',
     'utf8'
   );
-  console.log(`Saved to: ${filePath}`);
+  console.log(`\nSaved → ${p}`);
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────────
+// ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
   const browser = await chromium.launch({
     headless: false,
     args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
   });
-
   const context = await browser.newContext({
     userAgent:
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
@@ -240,68 +289,76 @@ async function main() {
     viewport: { width: 1280, height: 900 },
     locale: 'en-US',
   });
-
   const page = await context.newPage();
 
   try {
-    console.log('Navigating to Google Flights…');
+    // ── 1. Load page ────────────────────────────────────────────────────────
+    console.log('[1] Navigating to Google Flights…');
     await page.goto('https://www.google.com/travel/flights', {
-      waitUntil: 'networkidle',
+      waitUntil: 'domcontentloaded',
       timeout: 30000,
     });
-    await delay(1500);
+    await delay(2500);
+    await shot('1-loaded', page);
+    await dismissConsent(page);
 
-    await dismissConsentDialog(page);
+    // ── 2. Debug: log all inputs so we can see what's available ─────────────
+    await debugInputs(page);
 
-    await fillAirportField(page, 'Where from', ORIGIN_QUERY, ORIGIN_CODE);
-    await fillAirportField(page, 'Where to',   DESTINATION_QUERY, DESTINATION_CODE);
+    // ── 3. Fill origin ───────────────────────────────────────────────────────
+    console.log('[2] Filling origin…');
+    await fillAirport(page, 0, ORIGIN_QUERY, ORIGIN_CODE);
+    await shot('2-origin', page);
+    await debugInputs(page);   // re-check after origin fill (form may change)
 
-    await handleDatePicker(page);
+    // ── 4. Fill destination ──────────────────────────────────────────────────
+    console.log('[3] Filling destination…');
+    await fillAirport(page, 1, DESTINATION_QUERY, DESTINATION_CODE);
+    await shot('3-dest', page);
 
-    // Submit
-    console.log('\nSubmitting search…');
-    for (const sel of [
-      'button[aria-label*="Search" i]',
-      'button:has-text("Search")',
-    ]) {
+    // ── 5. Set dates ─────────────────────────────────────────────────────────
+    await handleDates(page);
+    await shot('4-dates', page);
+
+    // ── 6. Search ────────────────────────────────────────────────────────────
+    console.log('\n[4] Clicking Search…');
+    for (const sel of ['button[aria-label*="Search" i]', 'button:has-text("Search")']) {
       try {
         const btn = page.locator(sel).last();
         if (await btn.isVisible({ timeout: 2000 })) { await btn.click(); break; }
       } catch { /* try next */ }
     }
+    await delay(2000);
 
-    // Wait for results
-    console.log('Waiting for flight results…');
+    // ── 7. Wait for results ──────────────────────────────────────────────────
+    console.log('[5] Waiting for results (up to 25 s)…');
     await page.waitForSelector('[role="listitem"], li[jsmodel]', { timeout: 25000 });
     await delay(2500);
+    await shot('5-results', page);
 
-    // Extract + rank
+    // ── 8. Extract & save ────────────────────────────────────────────────────
     const all = await extractFlights(page);
     all.sort((a, b) => a.price - b.price);
     console.log(`\nExtracted ${all.length} flights total`);
 
-    const under300 = all.filter(f => f.price < PRICE_LIMIT);
-    const top3 = (under300.length > 0 ? under300 : all).slice(0, 3);
+    const under = all.filter(f => f.price < PRICE_LIMIT);
+    const top3  = (under.length > 0 ? under : all).slice(0, 3);
 
-    if (under300.length === 0 && all.length > 0) {
-      console.log(`No flights under $${PRICE_LIMIT} — showing cheapest 3:`);
-    } else {
-      console.log(`Flights under $${PRICE_LIMIT}: ${under300.length}. Top 3:`);
-    }
+    if (under.length === 0 && all.length > 0)
+      console.log(`None under $${PRICE_LIMIT} — showing cheapest 3:`);
 
-    console.log('\n--- Results ---');
+    console.log('\n--- Top Results ---');
     top3.forEach((f, i) =>
-      console.log(`${i + 1}. ${f.airline} | $${f.price} | ${f.departure} – ${f.arrival} | ${f.duration}`)
+      console.log(`${i+1}. ${f.airline} | $${f.price} | ${f.departure}–${f.arrival} | ${f.duration}`)
     );
 
-    if (top3.length > 0) saveCSV(top3, path.join(process.cwd(), 'flights.csv'));
+    if (top3.length > 0) saveCSV(top3);
     else console.log('No results to save.');
 
   } catch (err) {
-    console.error('\nError:', err);
-    const p = path.join(process.cwd(), 'screenshot.png');
-    await page.screenshot({ path: p, fullPage: true });
-    console.log(`Screenshot: ${p}`);
+    console.error('\n[ERROR]', err);
+    await shot('error', page);
+    console.log('Error screenshot → shot-error.png');
   } finally {
     await delay(3000);
     await browser.close();
