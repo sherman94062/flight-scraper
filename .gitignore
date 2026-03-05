@@ -3,3 +3,6 @@ dist/
 flights.csv
 screenshot.png
 screenshot-*.png
+shot-*.png
+credentials.json
+.env

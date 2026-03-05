@@ -1,4 +1,5 @@
 import { chromium, type Page } from 'playwright';
+import { google } from 'googleapis';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -249,6 +250,90 @@ async function extractFlights(page: Page): Promise<Flight[]> {
   return flights;
 }
 
+// ── Google Sheets ─────────────────────────────────────────────────────────────
+
+async function writeToSheets(flights: Flight[]): Promise<string | null> {
+  const credPath = path.join(cwd, 'credentials.json');
+  if (!fs.existsSync(credPath)) {
+    console.log('\n[Sheets] credentials.json not found — skipping. See SETUP.md.');
+    return null;
+  }
+
+  console.log('\n[Sheets] Creating new spreadsheet…');
+  const auth = new google.auth.GoogleAuth({
+    keyFile: credPath,
+    scopes: [
+      'https://www.googleapis.com/auth/spreadsheets',
+      'https://www.googleapis.com/auth/drive.file',
+    ],
+  });
+
+  const sheets = google.sheets({ version: 'v4', auth });
+  const drive  = google.drive({ version: 'v3', auth });
+
+  const title = `Flights AUS→JFK ${new Date().toLocaleDateString('en-US')}`;
+  const { data } = await sheets.spreadsheets.create({
+    requestBody: {
+      properties: { title },
+      sheets: [{ properties: { title: 'Results' } }],
+    },
+  });
+
+  const id  = data.spreadsheetId!;
+  const url = `https://docs.google.com/spreadsheets/d/${id}`;
+
+  // Write header + rows
+  const rows: (string | number)[][] = [
+    ['Rank', 'Airline', 'Price ($)', 'Departure', 'Arrival', 'Duration', 'Route', 'Scraped'],
+    ...flights.map((f, i) => [
+      i + 1, f.airline, f.price, f.departure, f.arrival, f.duration,
+      'AUS → JFK  round-trip  Mar 15–20 2026',
+      new Date().toLocaleString('en-US'),
+    ]),
+  ];
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: id,
+    range: 'Results!A1',
+    valueInputOption: 'RAW',
+    requestBody: { values: rows },
+  });
+
+  // Bold the header row
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: id,
+    requestBody: {
+      requests: [{
+        repeatCell: {
+          range: { sheetId: 0, startRowIndex: 0, endRowIndex: 1 },
+          cell: { userEnteredFormat: { textFormat: { bold: true } } },
+          fields: 'userEnteredFormat.textFormat.bold',
+        },
+      }],
+    },
+  });
+
+  // Share — if SHEET_SHARE_EMAIL is set, grant write access to that address;
+  // otherwise make it readable by anyone with the link.
+  const shareEmail = process.env.SHEET_SHARE_EMAIL;
+  if (shareEmail) {
+    await drive.permissions.create({
+      fileId: id,
+      requestBody: { type: 'user', role: 'writer', emailAddress: shareEmail },
+      sendNotificationEmail: false,
+    });
+    console.log(`  Shared with ${shareEmail}`);
+  } else {
+    await drive.permissions.create({
+      fileId: id,
+      requestBody: { type: 'anyone', role: 'reader' },
+    });
+    console.log('  Shared as "anyone with the link can view"');
+  }
+
+  return url;
+}
+
 function saveCSV(flights: Flight[]) {
   const p = path.join(cwd, 'flights.csv');
   fs.writeFileSync(p,
@@ -329,8 +414,13 @@ async function main() {
     top3.forEach((f, i) =>
       console.log(`${i+1}. ${f.airline} | $${f.price} | ${f.departure}–${f.arrival} | ${f.duration}`)
     );
-    if (top3.length > 0) saveCSV(top3);
-    else console.log('No results to save.');
+    if (top3.length > 0) {
+      saveCSV(top3);
+      const sheetUrl = await writeToSheets(top3);
+      if (sheetUrl) console.log(`\nGoogle Sheet → ${sheetUrl}`);
+    } else {
+      console.log('No results to save.');
+    }
 
   } catch (err) {
     console.error('\n[ERROR]', err);
