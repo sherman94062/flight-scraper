@@ -139,34 +139,34 @@ async function ensureMonthVisible(page: Page, month: string) {
 }
 
 async function clickDate(page: Page, ariaLabel: string, iso: string) {
-  const day = parseInt(iso.split('-')[2], 10);
-  for (const sel of [
-    `[aria-label="${ariaLabel}"]`,
-    `[data-iso="${iso}"]`,
-    `td[data-date="${iso}"]`,
-  ]) {
-    try {
-      const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 2000 })) {
-        await el.click();
-        console.log(`  ✓ Clicked ${ariaLabel}`);
-        return;
-      }
-    } catch { /* try next */ }
+  console.log(`  Clicking ${ariaLabel} (${iso})…`);
+
+  // data-iso is confirmed to exist on Google Flights calendar cells.
+  // Try scrolling it into view first, then a normal click.
+  const el = page.locator(`[data-iso="${iso}"]`).first();
+  try {
+    await el.scrollIntoViewIfNeeded({ timeout: 4000 });
+    await delay(300);
+    await el.click({ timeout: 5000 });
+    console.log(`  ✓ Clicked via data-iso`);
+    return;
+  } catch { /* fall through to JS click */ }
+
+  // JS click bypasses Playwright's visibility check — works even if the
+  // cell is technically off-screen or partially obscured.
+  const clicked = await page.evaluate((iso: string) => {
+    const el = document.querySelector(`[data-iso="${iso}"]`);
+    if (!el) return false;
+    (el as HTMLElement).click();
+    return true;
+  }, iso);
+
+  if (clicked) {
+    console.log(`  ✓ Clicked via JS evaluate`);
+    return;
   }
-  // Fallback: find a calendar cell whose text is exactly the day number
-  console.log(`  ⚠ Trying text-match fallback for day ${day}`);
-  const cells = page.locator('[role="dialog"] [role="gridcell"], [role="dialog"] td');
-  const n = await cells.count().catch(() => 0);
-  for (let i = 0; i < n; i++) {
-    const t = await cells.nth(i).innerText().catch(() => '');
-    if (t.trim() === String(day)) {
-      await cells.nth(i).click();
-      console.log(`  ✓ Clicked cell "${day}"`);
-      return;
-    }
-  }
-  throw new Error(`Could not click date: ${ariaLabel}`);
+
+  throw new Error(`Could not click date: ${ariaLabel} (${iso})`);
 }
 
 async function handleDates(page: Page) {
