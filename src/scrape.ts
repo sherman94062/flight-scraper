@@ -48,17 +48,18 @@ async function fillAirport(
 ) {
   console.log(`\n[Airport] "${placeholder}" → "${query}" (${code})`);
 
-  // Escape any open modal before starting
-  await page.keyboard.press('Escape').catch(() => {});
-  await delay(500);
+  // Only press Escape if a dialog is already open — pressing it on a clean
+  // page can collapse the search widget and hide the inputs.
+  const anyDialog = page.locator('[role="dialog"]');
+  if (await anyDialog.isVisible({ timeout: 800 }).catch(() => false)) {
+    await page.keyboard.press('Escape');
+    await delay(500);
+    await anyDialog.waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
+  }
 
-  // Wait until the target modal is NOT visible (clean state)
-  await page.locator(`[aria-label="${dialogLabel}"]`)
-    .waitFor({ state: 'hidden', timeout: 5000 })
-    .catch(() => {/* already hidden or never existed */});
-
-  // Click the origin/destination input in the collapsed form
+  // Wait for the input to be ready (handles slow page loads and re-renders)
   const input = page.locator(`input[placeholder="${placeholder}"]`).first();
+  await input.waitFor({ state: 'visible', timeout: 12000 });
   await input.click({ timeout: 6000 });
   await delay(400);
 
