@@ -1,0 +1,16 @@
+{
+  "name": "flight-scraper",
+  "version": "1.0.0",
+  "description": "Google Flights scraper — AUS to JFK, March 15–20 2026",
+  "scripts": {
+    "start": "tsx src/scrape.ts"
+  },
+  "dependencies": {
+    "playwright": "^1.50.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
