@@ -5,4 +5,5 @@ screenshot.png
 screenshot-*.png
 shot-*.png
 credentials.json
+token.json
 .env

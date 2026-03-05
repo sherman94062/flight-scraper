@@ -1,7 +1,9 @@
 import { chromium, type Page } from 'playwright';
 import { google } from 'googleapis';
 import * as fs from 'fs';
+import * as http from 'http';
 import * as path from 'path';
+import { exec } from 'child_process';
 
 const ORIGIN_QUERY      = 'Austin';
 const ORIGIN_CODE       = 'AUS';
@@ -252,24 +254,106 @@ async function extractFlights(page: Page): Promise<Flight[]> {
 
 // ── Google Sheets ─────────────────────────────────────────────────────────────
 
-async function writeToSheets(flights: Flight[]): Promise<string | null> {
-  const credPath = path.join(cwd, 'credentials.json');
-  if (!fs.existsSync(credPath)) {
+// ── Google OAuth helpers ──────────────────────────────────────────────────────
+
+const CREDS_PATH   = path.join(cwd, 'credentials.json');
+const TOKEN_PATH   = path.join(cwd, 'token.json');
+const OAUTH_SCOPES = [
+  'https://www.googleapis.com/auth/spreadsheets',
+  'https://www.googleapis.com/auth/drive.file',
+];
+
+/** Open a URL in the default macOS/Linux/Windows browser */
+function openBrowser(url: string) {
+  const cmd = process.platform === 'win32' ? `start ""  "${url}"`
+            : process.platform === 'darwin' ? `open "${url}"`
+            : `xdg-open "${url}"`;
+  exec(cmd);
+}
+
+/**
+ * Returns an authenticated OAuth2 client.
+ * • First run  → browser opens, user clicks Allow, token saved to token.json
+ * • Later runs → uses saved token (auto-refreshes if expired)
+ */
+async function getOAuthClient(): Promise<InstanceType<typeof google.auth.OAuth2> | null> {
+  if (!fs.existsSync(CREDS_PATH)) {
     console.log('\n[Sheets] credentials.json not found — skipping. See SETUP.md.');
     return null;
   }
 
-  console.log('\n[Sheets] Creating new spreadsheet…');
-  const auth = new google.auth.GoogleAuth({
-    keyFile: credPath,
-    scopes: [
-      'https://www.googleapis.com/auth/spreadsheets',
-      'https://www.googleapis.com/auth/drive.file',
-    ],
+  const raw   = JSON.parse(fs.readFileSync(CREDS_PATH, 'utf8'));
+  const creds = raw.installed ?? raw.web;
+  if (!creds?.client_id) {
+    console.log('\n[Sheets] credentials.json looks wrong — expected an "installed" OAuth key. See SETUP.md.');
+    return null;
+  }
+
+  const client = new google.auth.OAuth2(
+    creds.client_id,
+    creds.client_secret,
+    'http://localhost:3000',
+  );
+
+  // Re-use saved token if present
+  if (fs.existsSync(TOKEN_PATH)) {
+    client.setCredentials(JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf8')));
+    return client;
+  }
+
+  // ── First-time authorization via loopback server ──────────────────────────
+  const authUrl = client.generateAuthUrl({
+    access_type: 'offline',
+    scope: OAUTH_SCOPES,
+    prompt: 'consent',          // ensures refresh_token is returned
   });
 
-  const sheets = google.sheets({ version: 'v4', auth });
-  const drive  = google.drive({ version: 'v3', auth });
+  // Capture the redirect code via a local HTTP server
+  const code = await new Promise<string>((resolve, reject) => {
+    const server = http.createServer((req, res) => {
+      const qs   = new URL(req.url ?? '/', 'http://localhost:3000').searchParams;
+      const code = qs.get('code');
+      const err  = qs.get('error');
+      if (code) {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<html><body><h2>✅ Authorized! You may close this tab and return to the terminal.</h2></body></html>');
+        server.close();
+        resolve(code);
+      } else if (err) {
+        res.writeHead(400); res.end('Authorization failed: ' + err);
+        server.close();
+        reject(new Error('Google auth denied: ' + err));
+      }
+    });
+
+    server.listen(3000, () => {
+      openBrowser(authUrl);
+      console.log('\n[Sheets] A browser tab just opened — click "Allow" to authorize Google Sheets access.');
+      console.log('         If the browser did not open, visit:\n         ' + authUrl + '\n');
+    });
+
+    setTimeout(() => {
+      server.close();
+      reject(new Error('Google auth timed out after 2 minutes'));
+    }, 120_000);
+  });
+
+  const { tokens } = await client.getToken(code);
+  client.setCredentials(tokens);
+  fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens));
+  console.log('  ✓ Authorized — token saved to token.json (won\'t ask again)');
+
+  return client;
+}
+
+// ── Google Sheets writer ──────────────────────────────────────────────────────
+
+async function writeToSheets(flights: Flight[]): Promise<string | null> {
+  const client = await getOAuthClient();
+  if (!client) return null;
+
+  console.log('\n[Sheets] Creating spreadsheet in your Google Drive…');
+  const sheets = google.sheets({ version: 'v4', auth: client });
 
   const title = `Flights AUS→JFK ${new Date().toLocaleDateString('en-US')}`;
   const { data } = await sheets.spreadsheets.create({
@@ -282,7 +366,6 @@ async function writeToSheets(flights: Flight[]): Promise<string | null> {
   const id  = data.spreadsheetId!;
   const url = `https://docs.google.com/spreadsheets/d/${id}`;
 
-  // Write header + rows
   const rows: (string | number)[][] = [
     ['Rank', 'Airline', 'Price ($)', 'Departure', 'Arrival', 'Duration', 'Route', 'Scraped'],
     ...flights.map((f, i) => [
@@ -312,24 +395,6 @@ async function writeToSheets(flights: Flight[]): Promise<string | null> {
       }],
     },
   });
-
-  // Share — if SHEET_SHARE_EMAIL is set, grant write access to that address;
-  // otherwise make it readable by anyone with the link.
-  const shareEmail = process.env.SHEET_SHARE_EMAIL;
-  if (shareEmail) {
-    await drive.permissions.create({
-      fileId: id,
-      requestBody: { type: 'user', role: 'writer', emailAddress: shareEmail },
-      sendNotificationEmail: false,
-    });
-    console.log(`  Shared with ${shareEmail}`);
-  } else {
-    await drive.permissions.create({
-      fileId: id,
-      requestBody: { type: 'anyone', role: 'reader' },
-    });
-    console.log('  Shared as "anyone with the link can view"');
-  }
 
   return url;
 }

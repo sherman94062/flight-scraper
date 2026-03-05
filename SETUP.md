@@ -1,49 +1,61 @@
 # Google Sheets Setup
 
-Follow these steps once. It takes about 5 minutes.
+One-time setup (~5 minutes). After this, every `npm start` creates a new sheet **directly in your own Google Drive** — no sharing, no email config.
 
-## 1. Create a Google Cloud project
+---
 
-1. Go to https://console.cloud.google.com
-2. Click **Select a project → New Project**, name it anything (e.g. `flight-scraper`)
-3. Click **Create**
+## Step 1 — Create a Google Cloud project
 
-## 2. Enable the required APIs
+1. Go to **https://console.cloud.google.com**
+2. Click the project dropdown at the top → **New Project**
+3. Name it anything (e.g. `flight-scraper`) → **Create**
 
-In your new project, go to **APIs & Services → Library** and enable:
+---
 
-- **Google Sheets API**
-- **Google Drive API**
+## Step 2 — Enable two APIs
 
-## 3. Create a service account
+In your new project:
+
+1. Go to **APIs & Services → Library**
+2. Search for **Google Sheets API** → click it → **Enable**
+3. Search for **Google Drive API** → click it → **Enable**
+
+---
+
+## Step 3 — Create OAuth credentials
 
 1. Go to **APIs & Services → Credentials**
-2. Click **Create Credentials → Service account**
-3. Name it anything (e.g. `flight-scraper-sa`), click **Done**
-4. Click the service account you just created
-5. Go to the **Keys** tab → **Add Key → Create new key → JSON**
-6. Download the JSON file and save it as **`credentials.json`** in this project's root directory
+2. Click **Configure Consent Screen** (if prompted)
+   - Choose **External** → **Create**
+   - Fill in **App name** (anything) and your email → **Save and Continue** through the rest
+   - On the **Test users** screen, add your Gmail address → **Save**
+3. Back on the Credentials page, click **Create Credentials → OAuth client ID**
+4. Application type: **Desktop app** → name it anything → **Create**
+5. Click **Download JSON** on the confirmation dialog
+6. Rename the downloaded file to **`credentials.json`** and put it in this project's root folder
 
 > `credentials.json` is in `.gitignore` — it will never be committed.
 
-## 4. Run the scraper
+---
+
+## Step 4 — Run the scraper
 
 ```bash
 npm start
 ```
 
-The script will:
-- Create a new Google Sheet titled `Flights AUS→JFK <date>`
-- Write the top 3 results with a bold header row
-- Make it readable by anyone with the link
-- Print the URL in the console
+**On the very first run only:** a browser tab opens asking you to sign in with Google and click **Allow**.
+After that, a `token.json` is saved and you'll never be asked again.
 
-## 5. (Optional) Auto-share with your Google account
+The sheet appears automatically in your Google Drive titled **`Flights AUS→JFK <date>`**.
 
-Set `SHEET_SHARE_EMAIL` before running so the sheet appears directly in your Drive:
+---
 
-```bash
-SHEET_SHARE_EMAIL=you@gmail.com npm start
-```
+## Troubleshooting
 
-Or add it to a `.env` file and export it in your shell profile.
+| Problem | Fix |
+|---|---|
+| "Access blocked: app is not verified" | Click **Advanced → Go to \<app\> (unsafe)** — this is your own private app |
+| `credentials.json not found` | Make sure the file is in the project root (same folder as `package.json`) |
+| `token.json` causes auth errors | Delete `token.json` and run again to re-authorize |
+| Port 3000 already in use | Stop whatever is using port 3000, or change `3000` in `scrape.ts` and the OAuth credential redirect URI |
