@@ -452,20 +452,48 @@ async function main() {
     await handleDates(page);
     await shot('5-dates', page);
 
-    console.log('\n[5] Clicking Search…');
-    for (const sel of ['button[aria-label*="Search" i]', 'button:has-text("Search")']) {
+    // ── Submit search ────────────────────────────────────────────────────────
+    console.log('\n[5] Submitting search…');
+    await shot('5-pre-search', page);
+
+    let submitted = false;
+    for (const sel of [
+      'button[aria-label="Search"]',
+      'button[aria-label*="Search" i]',
+      'button:has-text("Search")',
+      '[jsname="vLv7Lb"]',          // Google Flights search button jsname
+    ]) {
       try {
         const btn = page.locator(sel).last();
-        if (await btn.isVisible({ timeout: 2000 })) { await btn.click(); break; }
+        if (await btn.isVisible({ timeout: 2000 })) {
+          await btn.click();
+          console.log(`  ✓ Clicked Search via: ${sel}`);
+          submitted = true;
+          break;
+        }
       } catch { /* try next */ }
     }
-    await delay(2000);
+    if (!submitted) {
+      console.log('  ⚠ Search button not found — pressing Enter');
+      await page.keyboard.press('Enter');
+    }
 
+    // Wait for URL to change, confirming the search was submitted
+    await page.waitForFunction(
+      () => window.location.href.includes('tfs=') || window.location.href.includes('/search'),
+      { timeout: 15000 }
+    ).catch(() => console.log('  ⚠ URL did not change — search may not have submitted'));
+
+    await delay(2000);
+    await shot('5-post-search', page);
+
+    // ── Wait for results ─────────────────────────────────────────────────────
     console.log('[6] Waiting for results…');
-    await page.waitForSelector('[role="listitem"], li[jsmodel]', { timeout: 25000 });
-    await delay(2500);
+    await page.waitForSelector('[role="listitem"], li[jsmodel]', { timeout: 35000 });
+    await delay(2000);
     await shot('6-results', page);
 
+    // ── Extract & save ───────────────────────────────────────────────────────
     const all = await extractFlights(page);
     all.sort((a, b) => a.price - b.price);
     console.log(`\nExtracted ${all.length} flights`);
@@ -479,20 +507,24 @@ async function main() {
     top3.forEach((f, i) =>
       console.log(`${i+1}. ${f.airline} | $${f.price} | ${f.departure}–${f.arrival} | ${f.duration}`)
     );
+
     if (top3.length > 0) {
       saveCSV(top3);
       const sheetUrl = await writeToSheets(top3);
-      if (sheetUrl) console.log(`\nGoogle Sheet → ${sheetUrl}`);
+      if (sheetUrl) {
+        console.log(`\n✅ Results written to Google Sheet:\n   ${sheetUrl}\n`);
+      }
     } else {
       console.log('No results to save.');
     }
+
+    console.log('Done. Closing browser…');
 
   } catch (err) {
     console.error('\n[ERROR]', err);
     await shot('error', page);
     console.log('Screenshot → shot-error.png');
   } finally {
-    await delay(3000);
     await browser.close();
   }
 }
